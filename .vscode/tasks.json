@@ -1,0 +1,30 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Run main.xe",
+            "command": "xrun",
+            "args": [
+                // each argument is supplied on the command line is provided in the list of strings below
+                "--io",
+                "${workspaceFolder}/bin/main.xe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Flash main.xe",
+            "command": "xflash",
+            "args": [
+                // each argument is supplied on the command line is provided in the list of strings below
+                "${workspaceFolder}/bin/main.xe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
