@@ -2,12 +2,36 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run main.xe",
-            "command": "xrun",
+            "label": "Build main.xe",
+            "type": "shell",
+            "command": "./run.sh",
             "args": [
                 // each argument is supplied on the command line is provided in the list of strings below
-                "--io",
-                "${workspaceFolder}/bin/main.xe"
+                "monitor",
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": {
+              "owner": "cpp",
+              "fileLocation": ["relative", "${workspaceFolder}"],
+              "pattern": {
+                "regexp": "^(.*?):(\\d+):(\\d+):\\s+(error|warning):\\s+(.*)$",
+                "file": 1,
+                "line": 2,
+                "column": 3,
+                "severity": 4,
+                "message": 5
+              }
+            } 
+        },
+        {
+            "label": "Clean main.xe",
+            "type": "shell",
+            "command": "./run.sh",
+            "args": [
+                // each argument is supplied on the command line is provided in the list of strings below
+                "clean",
             ],
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -15,16 +39,42 @@
             "problemMatcher": []
         },
         {
-            "label": "Flash main.xe",
-            "command": "xflash",
-            "args": [
-                // each argument is supplied on the command line is provided in the list of strings below
-                "${workspaceFolder}/bin/main.xe"
-            ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": []
+          "label": "Start xgdbserver",
+          "type": "shell",
+          "command": "killall xgdbserver 2>/dev/null; export XDBG_ADAPTER=xscope_endpoint; xgdbserver --log-level=info 2331",
+          "problemMatcher": {
+            "pattern": [
+              {
+                "regexp": ".",
+                "file": 1,
+                "location": 2,
+                "message": 3
+              }
+            ]
+          },
+          "isBackground": true,
+          "presentation": {
+            "reveal": "always",
+            "panel": "dedicated",
+            "focus": false
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": ".*Listening on port.*",
+            "endsPattern": ".*Listening on port.*"
+          }
+        },
+        {
+          "label": "Open Serial Monitor",
+          "type": "shell",
+          "command": "screen /dev/tty.debug-console 115200",
+          "problemMatcher": [],
+          "presentation": {
+            "reveal": "always",
+            "panel": "dedicated",
+            "focus": false
+          },
+          "isBackground": true
         }
     ]
 }

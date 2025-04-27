@@ -1,0 +1,10 @@
+Purpose | Signal | XMOS Port | Tile | Connects To
+Audio Bit Clock | I2S_BCLK | P1C | Tile 1 | Audio Codec BCLK
+Audio Left/Right Clock | I2S_LRCLK | P1B | Tile 1 | Audio Codec LRCLK
+Audio Master Clock | I2S_MCLK | P1D | Tile 1 | Audio Codec MCLK
+Audio Data In (ADC) | I2S_ADC_DATA | P1N | Tile 1 | Audio Codec ADC output
+Audio Data Out (DAC) | I2S_DAC_DATA | P1A | Tile 1 | Audio Codec DAC input
+Codec Reset | CODEC_RESET | P4A3 | Tile 1 | Audio Codec Reset pin
+Codec Config Clock | I2C_SCL | P1N | Tile 0 | Audio Codec I2C SCL
+Codec Config Data | I2C_SDA | P1O | Tile 0 | Audio Codec I2C SDA
+UART TX to host | UART_TX | P1H | Tile 1 | Serial-to-USB Adapter RX

@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.21)
+include($ENV{XMOS_CMAKE_PATH}/xcommon.cmake)
+
+# MUST come after include, before project()
+project(main)
+
+set(APP_HW_TARGET XK-EVK-XU316)
+
+# ✅ This is the only xscope config needed
+set(XSCOPE_IO XSCOPE_IO_BASIC)
+#set(XSCOPE_IO XSCOPE_IO_STREAMING)
+
+add_subdirectory(lib/lib_xcore_math)
+
+file(GLOB_RECURSE XCORE_MATH_SRCS
+  lib/lib_xcore_math/src/*.c
+)
+
+XMOS_REGISTER_APP(main
+  SRCS
+    src/main.xc
+    src/blink.xc
+    src/fft_processor.c
+    ${XCORE_MATH_SRCS}
+  INCLUDES
+    lib/lib_xcore_math/api
+)
+
+target_include_directories(main
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/lib_xcore_math/lib_xcore_math/api
+)
+
+target_link_libraries(main PUBLIC xscope)
+
+# (Optional) Explicitly add your sources if needed
+#target_sources(main
+#  PUBLIC
+#    src/main.xc
+#)

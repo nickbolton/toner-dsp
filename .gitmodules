@@ -1,0 +1,9 @@
+[submodule "lib/freertos"]
+	path = lib/freertos
+	url = https://github.com/xmos/FreeRTOS.git
+[submodule "lib/lib_i2s"]
+	path = lib/lib_i2s
+	url = https://github.com/xmos/lib_i2s.git
+[submodule "lib/lib_i2c"]
+	path = lib/lib_i2c
+	url = https://github.com/xmos/lib_i2c.git
