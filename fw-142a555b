@@ -1,0 +1,604 @@
+#define UNSAFE_LIBC 1
+
+#include <platform.h>
+#include <quadflashlib.h>
+#include <xclib.h>
+#include <hwlock.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
+fl_PortHolderStruct portHolder_0 =
+{
+  PORT_SQI_CS,
+  PORT_SQI_SCLK,
+  PORT_SQI_SIO,
+  on tile[0]: XS1_CLKBLK_5
+};
+
+hwlock_t portLock = 0;
+
+void xflash_ctor()
+{
+  if (!portLock) portLock = hwlock_alloc();
+}
+
+fl_QuadDeviceSpec deviceSpecs_0[] =
+{
+  FL_QUADDEVICE_DEFAULT,
+//FL_QUADDEVICE_XN:
+  { 0, /* flashId */
+256, /* pageSize */
+16384, /* numPages */
+-1, /* addrSize */
+-1, /* clockDiv */
+-1, /* idCommand */
+-1, /* idDummyBytes */
+-1, /* idBytes */
+0, /* idValue */
+-1, /* sectorEraseCommand */
+-1, /* sectorEraseSize */
+-1, /* writeEnableCommand */
+-1, /* writeDisableCommand */
+-1, /* protectionType */
+{{-1,-1},{-1,-1}}, /* protection */
+-1, /* programPageCommand */
+-1, /* readCommand */
+-1, /* readDummyBytes */
+SECTOR_LAYOUT_REGULAR, /* sectorLayout */
+{4096,{-1,{0}}}, /* sectorSizes */
+-1, /* readSRCommand */
+-1, /* writeSRCommand */
+-1, /* wipBitMask */
+0xFFFFFFFF, /* idMask */
+-1, /* quadEnable */
+ },
+};//fl_QuadDeviceSpec
+
+extern "C" {int setvbuf ( FILE * stream, char * buffer, int mode, size_t size );}
+
+#define FILE_BUF_SIZE 32768
+char file_buf[FILE_BUF_SIZE];
+
+const char* write_from_bin[]=
+{
+  "flash_bin_node0",
+};
+
+const char* write_from_ppb[]=
+{
+  "flash_bin_node0.ppb",
+};
+
+void xflash_erase_sector(chanend backFrom, unsigned int sector)
+{
+  unsigned char check_buf[256];
+  unsigned int dud;
+
+  unsigned int pageSize = fl_getPageSize();
+  unsigned int eraseAddress = fl_getSectorAddress(sector);
+  unsigned int eraseSize = fl_getSectorSize(sector);
+  unsigned int eraseCheck = 0xFF;
+  while (eraseSize != 0)
+  {
+    fl_readPage(eraseAddress, check_buf);
+    for (int i = 0; i < pageSize; i++)
+    {
+      eraseCheck &= check_buf[i];
+    }
+    eraseAddress += pageSize;
+    eraseSize -= pageSize;
+  }
+
+  if (eraseCheck != 0xFF)
+  {
+    fl_eraseSector(sector);
+  }
+  backFrom <: eraseCheck != 0xFF ? 12 : 20;
+  backFrom <: fl_getSectorAddress(sector);
+  backFrom :> dud;
+}
+
+unsigned int xflash_write_erase(chanend backFrom, unsigned int sector, unsigned int address)
+{
+  for (unsigned int i = sector; i < fl_getNumSectors(); i++)
+  {
+    if (address >= fl_getSectorAddress(i) && address < fl_getSectorAddress(i) + fl_getSectorSize(i))
+    {
+      xflash_erase_sector(backFrom, i);
+      return i + 1;
+    }
+  }
+  return sector;
+}
+
+void xflash_write_page(chanend backFrom, unsigned int page, unsigned char *buf)
+{
+  unsigned char check_buf[256];
+  unsigned int dud;
+
+  unsigned int pageSize = fl_getPageSize();
+  unsigned int writeCheck = 0xFF;
+  for (int i = 0; i < pageSize; i++)
+  {
+    writeCheck &= buf[i];
+  }
+
+  if (writeCheck != 0xFF)
+  {
+    fl_writePage(page, buf);
+  }
+  backFrom <: writeCheck != 0xFF ? 11 : 20;
+  backFrom <: page;
+  backFrom :> dud;
+
+  if (writeCheck == 0xFF) return;
+  fl_readPage(page, check_buf);
+  for (int i = 0; i < pageSize; i++)
+  {
+    if (buf[i] != check_buf[i])
+    {
+      fprintf(stderr,"Verify failed for page 0x%08x, offset 0x%04x (read 0x%02x, expected 0x%02x).\n", page, i, check_buf[i], buf[i]);
+      exit(1);
+    }
+  }
+}
+void xflash_bin_write(chanend backFrom, FILE * unsafe inFile, unsigned int fileSize, unsigned int pageOffset, unsigned int pageCount, unsigned int pageSize)
+{
+  unsigned char buf[256];
+
+  unsigned int eraseSector = 0;
+  unsigned int writePage = 0;
+  for (writePage = pageOffset; writePage < (pageOffset + pageCount); writePage++)
+  {
+    for (int i = 0; i < pageSize; i++)
+    {
+        buf[i] = 0xFF;
+    }
+    unsigned int fileBlock = fread(buf, 1, pageSize, inFile);
+    if (fileBlock == 0) break;
+
+    eraseSector = xflash_write_erase(backFrom, eraseSector, writePage * pageSize);
+    xflash_write_page(backFrom, writePage * pageSize, buf);
+    if (fileBlock < pageSize) break;
+  }
+}
+
+void xflash_ppb_write(chanend backFrom, FILE * unsafe inFile, unsigned int fileSize, unsigned int pageOffset, unsigned int pageCount, unsigned int pageSize)
+{
+  unsigned char page_buf[256]; unsigned char block_buf[1024];
+
+  if (pageCount == 0) return;
+  unsigned int flash_write = pageOffset * pageSize;
+  unsigned int flash_erase = 0;
+
+  #define flash_page ((flash_write / pageSize) * pageSize)
+  #define flash_page_offset (flash_write % pageSize)
+  #define flash_page_done (flash_page_offset == 0 && flash_write != 0)
+  #define flash_page_write (flash_page - pageSize)
+
+  unsigned int packet_size = 0;
+  unsigned int packet_addr = 0;
+
+  int packet_offset = ftell(inFile);
+  int packet_magic = fgetc(inFile);
+  while (packet_magic == 0x01)
+  {
+    unsigned char header[sizeof(packet_size) + sizeof(packet_addr)] = { 0 };
+    if (fread(&header, sizeof(header), 1, inFile) != 1)
+    {
+      printf("Error: failed to read header for packet @ 0x%08x.\n", packet_offset);
+      exit(1);
+    }
+    packet_size = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | (header[3] << 0);
+    packet_addr = (header[4] << 24) | (header[5] << 16) | (header[6] << 8) | (header[7] << 0);
+    packet_addr += pageOffset * pageSize;
+
+    unsigned char check = 0;
+    do
+    {
+      unsigned int block_size = min(packet_size, 1024);
+      int block_offset = ftell(inFile);
+      if (fread(block_buf, block_size, 1, inFile) != 1 && block_size != 0)
+      {
+        printf("Error: failed to read payload @ 0x%08x for packet @ 0x%08x.\n", block_offset, packet_offset);
+        exit(1);
+      }
+      int sum_offset = ftell(inFile);
+      int sum_value = fgetc(inFile);
+      if (sum_value == EOF)
+      {
+        printf("Error: failed to read checksum @ 0x%08x for packet @ 0x%08x.\n", sum_offset, packet_offset);
+        exit(1);
+      }
+      for (int i = 0; i < block_size; i++)
+      {
+        check += block_buf[i];
+      }
+      if ((unsigned char) -check != sum_value)
+      {
+        printf("Error: checksum @ 0x%08x invalid (expected 0x%02x, got 0x%02x) for packet @ 0x%08x.\n", sum_offset, (unsigned char) -check, sum_value, packet_offset);
+        exit(1);
+      }
+
+      while (flash_write < packet_addr)
+      {
+        page_buf[flash_page_offset] = 0xFF;
+        flash_write++;
+        if (flash_page_done)
+        {
+          flash_erase = xflash_write_erase(backFrom, flash_erase, flash_page_write);
+          xflash_write_page(backFrom, flash_page_write, page_buf);
+          pageCount--; if (pageCount == 0) return;
+        }
+      }
+
+      for (int i = 0; i < block_size; i++)
+      {
+        page_buf[flash_page_offset] = block_buf[i];
+        flash_write++;
+        if (flash_page_done)
+        {
+          flash_erase = xflash_write_erase(backFrom, flash_erase, flash_page_write);
+          xflash_write_page(backFrom, flash_page_write, page_buf);
+          pageCount--; if (pageCount == 0) return;
+        }
+      }
+
+      packet_size -= block_size;
+      packet_addr += block_size;
+    } while (packet_size != 0);
+
+    packet_offset = ftell(inFile);
+    packet_magic = fgetc(inFile);
+  }
+
+  if (packet_magic != EOF)
+  {
+    printf("Error: expected EOF or packet @ 0x%08x, got 0x%02x.\n", packet_offset, packet_magic);
+    exit(1);
+  }
+
+  while (!flash_page_done)
+  {
+    page_buf[flash_page_offset] = 0xFF;
+    flash_write++;
+    if (flash_page_done)
+    {
+      flash_erase = xflash_write_erase(backFrom, flash_erase, flash_page_write);
+      xflash_write_page(backFrom, flash_page_write, page_buf);
+      pageCount--; if (pageCount == 0) return;
+    }
+  }
+
+  #undef flash_page_write
+  #undef flash_page_done
+  #undef flash_page_offset
+  #undef flash_page
+}
+
+int main()
+{
+  chan backFrom[1];
+  par
+  {
+    on tile[0]:
+    {
+      asm volatile(".section .ctors, \"aw\", @progbits\n.align 4\n.word xflash_ctor\n.text\n");
+      unsigned int siteStatus[1];
+      unsigned int siteDatum[1];
+      unsigned int isOkay = 1;
+      unsigned int isSilent = 1;
+      unsigned int respCount = 0;
+      unsigned int lastLength = 0;
+      for (int i = 0; i < 1; i++)
+      {
+        siteStatus[i]=0;
+      }
+      while (respCount < 1)
+      {
+        char userChoice;
+        unsigned int status;
+        unsigned int srcSite;
+        unsigned int isChanged = 0;
+        select
+        {
+        case backFrom[0] :> status:
+          srcSite = 0;
+          break;
+        }
+        switch (status)
+        {
+        default:
+          isOkay = 0;
+          break;
+        case 0:
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          isOkay &= (value==0);
+          respCount++;
+          siteStatus[srcSite] = status;
+          siteDatum[srcSite] = value;
+          break;
+        case 1:
+        {
+          siteStatus[srcSite] = status;
+          isChanged = 1;
+          break;
+        }
+        case 2:
+        {
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          siteStatus[srcSite] = status;
+          siteDatum[srcSite] = value;
+          isChanged = value != 0;
+          break;
+        }
+        case 3:
+        {
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          siteStatus[srcSite] = status;
+          siteDatum[srcSite] = value;
+          isChanged = 1;
+          break;
+        }
+        case 10:
+        case 11:
+        case 12:
+        {
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          siteStatus[srcSite] = status;
+          if ((value & 0x3fff) == 0)
+          {
+          siteDatum[srcSite] = value;
+          isChanged = 1;
+          }
+          break;
+        }
+        case 20:
+        {
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          siteStatus[srcSite] = status;
+          if ((value & 0xfffff) == 0)
+          {
+          siteDatum[srcSite] = value;
+          isChanged = 1;
+          }
+          break;
+        }
+        case 100:
+        {
+          unsigned int value;
+          backFrom[srcSite] :> value;
+          isOkay &= (value==0);
+          respCount++;
+          isChanged = 1;
+          siteStatus[srcSite] = status;
+          siteDatum[srcSite] = value;
+          break;
+        }
+        }
+        if (isChanged)
+        {
+          isSilent = 0;
+          unsigned int thisLength=0;
+          thisLength += printf("\r");
+          for (int i = 0; i < 1; i++)
+          {
+            if (siteStatus[i] == 0) continue;
+            thisLength += printf("Site %d ",i);
+            switch (siteStatus[i])
+            {
+            case 1:
+              thisLength += printf("has started.         ");
+              break;
+            case 2:
+              thisLength += printf("reports ");
+              unsigned int prefixLength = thisLength - 1;
+              if (siteDatum[i] & LIBRARY_WARNING_PAGESIZE_MISMATCH)
+              {
+                printf("warning: Page size override does not match SFDP response. Please check XN file or SPI-SPEC.\n");
+                printf("%*c", prefixLength, ' ');
+              }
+              if (siteDatum[i] & LIBRARY_WARNING_NUMPAGES_MISMATCH)
+              {
+                printf("warning: Number of pages override does not match SFDP response. Please check XN file or SPI-SPEC.\n");
+                printf("%*c", prefixLength, ' ');
+              }
+              if (siteDatum[i] & LIBRARY_WARNING_QUADENABLE_MISMATCH)
+              {
+                printf("warning: QE bit location override does not match SFDP response. Please check XN file or SPI-SPEC.\n");
+                printf("%*c", prefixLength, ' ');
+              }
+              printf("\rContinue? (Y/N) ");
+              fflush(stdout);
+              scanf("%c", &userChoice);
+              if (userChoice != 'Y' && userChoice != 'y')
+              {
+                exit(1);
+              }
+            break;
+            case 3:
+              thisLength += printf("has ID   0x%06x.   ", siteDatum[i]);
+              break;
+            case 10:
+              thisLength += printf("read     0x%08x. ", siteDatum[i]);
+              break;
+            case 11:
+              thisLength += printf("write    0x%08x. ", siteDatum[i]);
+              break;
+            case 12:
+              thisLength += printf("erase    0x%08x. ", siteDatum[i]);
+              break;
+            case 20:
+              thisLength += printf("skip     0x%08x. ", siteDatum[i]);
+              break;
+            case 100:
+              thisLength += printf("has finished successfully.        ");
+              break;
+            }
+          }
+          while (thisLength < lastLength)
+          {
+            thisLength += printf(" ");
+          }
+          lastLength = thisLength;
+          fflush(stdout);
+        }
+        backFrom[srcSite] <: 0;
+      }
+      if (!isSilent)
+      {
+        printf("\n");
+      }
+      if (!isOkay)
+      {
+        exit(1);
+      }
+      for (int i = 0; i < 1; i++)
+      {
+        backFrom[i] <: 0;
+      }
+      exit(0);
+    }
+
+    on tile[1]:
+    {
+      asm volatile("clre");
+      asm volatile("waiteu");
+    }
+
+    on tile[0]:
+    {
+      portHolder_0.qspiCS <: 1;
+      hwlock_acquire(portLock);
+      unsigned int dud;
+
+      backFrom[0] <: 1;
+      backFrom[0] :> dud;
+
+      int cRes = fl_connectToDevice(portHolder_0, deviceSpecs_0, sizeof(deviceSpecs_0) / sizeof(fl_QuadDeviceSpec));
+      if (cRes != 0)
+      {
+        switch (cRes)
+        {
+          default:
+          case 1:
+          {
+            printf("Error: Failed to recognise flash device at node \"0\".\n");
+            break;
+          }
+          case 2:
+          {
+            printf("Error: Incomplete configuration for flash device at node \"0\". Please check XN file or SPI-SPEC.\n");
+            break;
+          }
+        }
+        backFrom[0] <: 0;
+        backFrom[0] <: 1;
+        exit(1);
+      }
+
+      backFrom[0] <: 2;
+      backFrom[0] <: fl_getLibraryStatus();
+      backFrom[0] :> dud;
+      fl_clearLibraryStatus();
+
+      backFrom[0] <: 3;
+      backFrom[0] <: fl_getJedecId();
+      backFrom[0] :> dud;
+
+      fl_quadEnable();
+
+      fl_setProtection(0);
+
+      FILE * unsafe inFile = NULL;
+      unsigned int fileType = UINT32_MAX;
+      unsigned int fileSize = 0;
+
+      FILE * unsafe inFiles[2] = { NULL };
+      unsafe {
+        inFiles[0] = fopen(write_from_bin[0],"rb");
+        inFiles[1] = fopen(write_from_ppb[0],"rb");
+      }
+
+      for (unsigned int i = 0; i < sizeof(inFiles) / sizeof(FILE * unsafe); i++)
+      {
+        if (inFiles[i] == NULL) continue;
+        fseek(inFiles[i], 0, SEEK_END);
+        unsigned int inSize = ftell(inFiles[i]);
+        fseek(inFiles[i], 0, SEEK_SET);
+        if (fileType == UINT32_MAX || inSize < fileSize)
+        {
+          unsafe {
+            inFile = inFiles[i];
+          }
+          fileSize = inSize;
+          fileType = i;
+        }
+      }
+
+      if (fileType == UINT32_MAX)
+      {
+        exit(1);
+      }
+
+      setvbuf(inFile, file_buf, _IOFBF, FILE_BUF_SIZE);
+
+      unsigned int pageSize = fl_getPageSize();
+      unsigned int pageCount = fl_getNumPages();
+      unsigned int pageOffset = 0 / pageSize;
+      if (pageSize > 256)
+      {
+        printf("Error: page sizes greater than 256 bytes are unsupported (found %d bytes).\n", pageSize);
+        exit(1);
+      }
+
+      switch (fileType)
+      {
+        case 0:
+        {
+          xflash_bin_write(backFrom[0], inFile, fileSize, pageOffset, pageCount, pageSize);
+          break;
+        }
+        case 1:
+        {
+          xflash_ppb_write(backFrom[0], inFile, fileSize, pageOffset, pageCount, pageSize);
+          break;
+        }
+        default:
+        {
+          exit(1);
+          break;
+        }
+      }
+
+      for (unsigned int i = 0; i < sizeof(inFiles) / sizeof(FILE * unsafe); i++)
+      {
+        if (inFiles[i] != NULL)
+        {
+          fclose(inFiles[i]);
+        }
+      }
+
+      fl_disconnect();
+      hwlock_release(portLock);
+
+      backFrom[0] <: 100;
+      backFrom[0] <: 0;
+      backFrom[0] :> dud;
+      backFrom[0] :> dud;
+    }
+
+  }
+  return(0);
+}

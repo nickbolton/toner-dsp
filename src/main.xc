@@ -1,139 +1,88 @@
-#include <xs1.h>
-#include <xclib.h>
-#include <math.h>
-#include <stdio.h>
-#include <xmath/xmath.h>
-#include <stdlib.h>
-#include <xscope.h>
-#include <print.h>
-#include <uart.h>
+// Copyright 2014-2024 XMOS LIMITED.
+// This Software is subject to the terms of the XMOS Public Licence: Version 1.
 #include <platform.h>
+#include <xs1.h>
+#include "i2s.h"
+#include "xk_evk_xu316/board.h"
 
-#define SAMPLE_RATE 48000
-#define FFT_SIZE 65536
-//#define FFT_SIZE 1024
-#define UART_ACTIVE_HIGH 1
-#define START_FRAME_MARKER 47.0f
-#define END_FRAME_MARKER 51.0f
+#define SAMPLE_FREQUENCY        (48000)
+#define MASTER_CLOCK_FREQUENCY  (24576000)
+#define DATA_BITS               (32)
+#define CHANS_PER_FRAME         (2)
+#define NUM_I2S_LINES           (1)
 
-extern void blinkLed();
+// I2S resources
+on tile[1]: in port p_mclk =                                PORT_MCLK_IN;
+on tile[1]: buffered out port:32 p_lrclk =                  PORT_I2S_LRCLK;
+on tile[1]: out port p_bclk =                               PORT_I2S_BCLK;
+on tile[1]: buffered out port:32 p_dac[NUM_I2S_LINES] =     {PORT_I2S_DAC_DATA};
+on tile[1]: buffered in port:32 p_adc[NUM_I2S_LINES] =      {PORT_I2S_ADC_DATA};
+on tile[1]: clock bclk =                                    XS1_CLKBLK_1;
 
-char polarity_map[1] = { UART_ACTIVE_HIGH };
+// Board configuration from lib_board_support
+static const xk_evk_xu316_config_t hw_config = {
+        MASTER_CLOCK_FREQUENCY, // default_mclk
+};
 
-void generate_signal(chanend c_out) {
-  timer tmr;
-  unsigned time;
-  tmr :> time;
-  unsigned period = 48000 / SAMPLE_RATE; // 48000 MHz clock
 
-  while (1) {
-    for (int i = 0; i < FFT_SIZE; ++i) {
-      float sample = sinf(2 * M_PI * 1000.0f * i / SAMPLE_RATE); // 1kHz sine
-      c_out <: sample;
-      time += period;
-      tmr when timerafter(time) :> void;
-    }
-  }
-}
+[[distributable]]
 
-void fft_capture(chanend c_in, chanend c_out) {
-  float input[FFT_SIZE];
-  int i = 0;
- 
+void i2s_loopback(server i2s_frame_callback_if i2s, chanend c)
+{
+  int32_t samples[NUM_I2S_LINES * CHANS_PER_FRAME] = {0};
+
+  xk_evk_xu316_AudioHwChanInit(c);
+  xk_evk_xu316_AudioHwInit(hw_config);
+  xk_evk_xu316_AudioHwConfig(SAMPLE_FREQUENCY, MASTER_CLOCK_FREQUENCY, 0, DATA_BITS, DATA_BITS);
+
   while (1) {
     select {
-      case c_in :> input[i]:
-        i++;
-        if (i == FFT_SIZE) {
-          c_out <: START_FRAME_MARKER;
-          complex_float_t *result = (complex_float_t *)fft_f32_forward(input, FFT_SIZE);
-          for (int j = 0; j < FFT_SIZE / 2; ++j) {
-            float mag = sqrtf(result[j].re * result[j].re + result[j].im * result[j].im);
-            c_out <: mag; // Push each magnitude as a float
-          }
-          c_out <: END_FRAME_MARKER;
-          i = 0;
+      case i2s.init(i2s_config_t &?i2s_config, tdm_config_t &?tdm_config):
+        i2s_config.mode = I2S_MODE_I2S;
+        i2s_config.mclk_bclk_ratio = (MASTER_CLOCK_FREQUENCY/(SAMPLE_FREQUENCY * CHANS_PER_FRAME * DATA_BITS));
+
+        xk_evk_xu316_AudioHwConfig(SAMPLE_FREQUENCY, MASTER_CLOCK_FREQUENCY, 0, DATA_BITS, DATA_BITS);
+        break;
+
+      case i2s.receive(size_t num_chan_in, int32_t sample[num_chan_in]):
+        for (size_t i=0; i<num_chan_in; i++) {
+          samples[i] = sample[i];
         }
         break;
-    }
-  }
-}
 
-void write(uint32_t value, client uart_tx_if tx_if) {
-  uint8_t *ptr = (uint8_t *)&value;
-  for (size_t i = 0; i < sizeof(uint32_t); i++) {
-    tx_if.write(ptr[i]);
-  }
-}
-
-void fft_transmit(chanend c_in, client uart_tx_if tx_if) {
-  const uint32_t FRAME_START = 0xA5A5A5A5;
-  const uint32_t FRAME_END   = 0x5A5A5A5A;
-
-  uint32_t frameSize = FFT_SIZE;
-  float mag;
-  uint8_t *bytes = (uint8_t *)&mag;
-
-  while (1) {
-    // Receive one magnitude value
-    c_in :> mag;
-
-    if (mag == START_FRAME_MARKER || mag == END_FRAME_MARKER) {
-      uint32_t value = mag == START_FRAME_MARKER ? FRAME_START : FRAME_END;
-      write(value, tx_if);
-      if (mag == START_FRAME_MARKER) {
-        write(frameSize, tx_if);
-      }
-    } else {
-      // Send 4 bytes (float) over UART
-      for (int i = 0; i < sizeof(float); i++) {
-        tx_if.write(bytes[i]);
-      }
-    }
-  }
-}
-
-void uart_tx_task(server uart_tx_if tx, client output_gpio_if gpio) {
-  uart_tx(tx, null, 115200, UART_PARITY_NONE, 8, 1, gpio);
-}
-
-void uart_to_pin(server output_gpio_if gpio_if, out port p) {
-  while (1) {
-    select {
-      case gpio_if.output(unsigned value):
-        // printf("sending value to pin: %u…\n", value & 0x1);
-        p <: (value & 0x1); // Mask to 0 or 1 before output
+      case i2s.send(size_t num_chan_out, int32_t sample[num_chan_out]):
+        for (size_t i=0; i<num_chan_out; i++){
+          sample[i] = samples[i];
+        }
         break;
-      case gpio_if.output_and_timestamp(unsigned data) -> gpio_time_t ts:
+
+      case i2s.restart_check() -> i2s_restart_t restart:
+        restart = I2S_NO_RESTART;
         break;
     }
   }
 }
 
-on tile[0]: out port p_uart_tx = XS1_PORT_1A;
-
-int main() {
-  chan capture;
-  chan transmit;
-  interface uart_tx_if tx_if;
-  interface output_gpio_if tx_gpio[1];
+int main(void)
+{
+  // Channel for communication between tiles for I2C
+  chan c;
 
   par {
-    // incoming signal
-    on tile[1]: generate_signal(capture);
+    on tile[0]: {
+        // Startup a remote I2C master server task
+        xk_evk_xu316_AudioHwRemote(c);
+    }
 
-    // fft processing
-    on tile[0]: fft_capture(capture, transmit);
-    on tile[0]: fft_transmit(transmit, tx_if);
+    on tile[1]: {
+        interface i2s_frame_callback_if i_i2s;
 
-    // uart
-    on tile[0]: uart_to_pin(tx_gpio[0], p_uart_tx); // Direct pin driver
-    on tile[1]: uart_tx_task(tx_if, tx_gpio[0]);
-
-    // utils
-    on tile[0]: blinkLed();
+        par {
+            // The application - loopback the I2S samples - note callbacks are inlined so does not take a thread
+            [[distribute]] i2s_loopback(i_i2s, c);
+            i2s_frame_master(i_i2s, p_dac, NUM_I2S_LINES, p_adc, NUM_I2S_LINES, DATA_BITS, p_bclk, p_lrclk, p_mclk, bclk);
+        }
+    }
   }
-
   return 0;
 }
-

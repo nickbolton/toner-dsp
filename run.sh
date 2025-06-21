@@ -1,11 +1,11 @@
 #!/bin/bash
 
 BUILD_DIR=build
-TARGET_XE=bin/main.xe
+TARGET_XE=bin/TonerDSP.xe
 
 function build() {
   cmake -B ${BUILD_DIR} -DCMAKE_EXPORT_COMPILE_COMMANDS=1
-  cmake --build ${BUILD_DIR} --target main
+  cmake --build ${BUILD_DIR} --target TonerDSP
 }
 
 function flash() {
